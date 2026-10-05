@@ -22,6 +22,28 @@
 
 #include "qso_dmr_vocoder.h"
 
+// B3 (TA2IW / F4LZT): open UTF-8 paths via the UTF-16 API on Windows so a
+// non-ASCII %APPDATA% profile path (Turkish/French usernames) resolves. A narrow
+// fopen() uses the ANSI code page and fails on such paths -> QDV_ERR_FIRMWARE_OPEN
+// / QDV_ERR_CORE_OPEN. POSIX fopen is already UTF-8. Mirrors md380_unwrap.cpp.
+#if defined(_WIN32)
+#include <windows.h>
+#include <string>
+static FILE* qdv_fopen_utf8(const char* path_utf8, const char* mode_ascii) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, nullptr, 0);
+    if (wlen <= 0) return nullptr;
+    std::wstring wpath((size_t)wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, &wpath[0], wlen);
+    wchar_t wmode[8] = {0};
+    for (int i = 0; mode_ascii[i] && i < 7; ++i) wmode[i] = (wchar_t)mode_ascii[i];
+    return _wfopen(wpath.c_str(), wmode);
+}
+#else
+static FILE* qdv_fopen_utf8(const char* path, const char* mode) {
+    return fopen(path, mode);
+}
+#endif
+
 // Guest firmware window is 0x100000 (1 MiB) per the emulator's MemoryRead8
 // bounds. The real MD380 firmware (D002.032.bin) is 994304 bytes; we size the
 // buffer to the full window so any in-window access stays in bounds.
@@ -52,7 +74,7 @@ static size_t file_size(FILE* f) {
 // Declared in qdv_abi.cpp (internal linkage boundary).
 int qdv_runtime_load(const char* firmware_path, const char* core_path) {
     // --- firmware ---
-    FILE* ff = fopen(firmware_path, "rb");
+    FILE* ff = qdv_fopen_utf8(firmware_path, "rb");
     if (!ff) return QDV_ERR_FIRMWARE_OPEN;
     size_t fsz = file_size(ff);
     if (fsz == (size_t)-1 || fsz < kFirmwareMinSize || fsz > kFirmwareCapacity) {
@@ -66,7 +88,7 @@ int qdv_runtime_load(const char* firmware_path, const char* core_path) {
     firmware_len = (unsigned int)fsz;
 
     // --- core (SRAM image) ---
-    FILE* cf = fopen(core_path, "rb");
+    FILE* cf = qdv_fopen_utf8(core_path, "rb");
     if (!cf) return QDV_ERR_CORE_OPEN;
     size_t csz = file_size(cf);
     if (csz != kCoreSize) {

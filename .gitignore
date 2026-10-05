@@ -1,0 +1,30 @@
+# Build outputs
+build-windows/
+build-android/
+*.log
+*.dll
+*.so
+*.lib
+*.exp
+*.pdb
+*.exe
+qdv_test
+
+# Firmware MUST NEVER be committed (non-redistributable, runtime input only)
+*.bin
+*.img
+
+# Round-trip artifacts
+out/
+out-android/
+*.wav
+
+# Boost headers (external build prereq, not part of the module)
+boost_*/
+
+# Other ABI build dirs (2026-10-05)
+build-android-x64/
+build-android-v7a/
+
+# The dv-codec test clips ARE source (real speech, see test/clips/README.md)
+!test/clips/*.wav

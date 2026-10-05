@@ -40,3 +40,31 @@ its externals are fetched by CMake. No python3/unzip/xxd/curl are needed.
 
 - Windows x64: `build_windows.bat` -> `build-windows/qso_dmr_vocoder.dll`
 - Android arm64: `build_android.bat` (NDK 27, arm64-v8a) -> `build-android/libqso_dmr_vocoder.so`
+
+## D-Star and P25 codecs: the helper's "dv" mode (2026-10-05)
+
+The bundled helper executable also carries the D-Star (AMBE 3600x2400 with
+D-Star FEC, 9-byte frames) and P25 Phase 1 (IMBE 7200x4400, 11-byte frames)
+software voice codecs. They run ONLY when the helper is started with the single
+argument `dv`, as a separate process; that mode never calls `qdv_*` and needs no
+firmware. Protocol: `src/dv_mode.cpp`. Codecs: `third_party/dv_codecs/`
+(mbelib ISC, Pavel Yazev IMBE GPL v3+, OP25 AMBE encoder GPL v3+, MMDVMHost
+tables GPL v2+, DroidStar glue GPL v3+); our local changes, including the D-Star
+loudness fix, are listed in `NOTICE.md`.
+
+Builds (every target links dv mode):
+- Windows x64: `build_windows.bat` -> `build-windows/qso_dmr_vocoder_helper.exe`
+  (+ `dv_test.exe`)
+- Android arm64-v8a: `build_android.bat` -> `build-android/libqso_dmr_vocoder_helper.so`
+- Android x86_64: `build_android_x64.bat` -> `build-android-x64/` (then
+  `llvm-strip --strip-all`)
+- Android armeabi-v7a: `build_android_v7a.bat` -> `build-android-v7a/` (the
+  native 32-bit MD-380 helper from `v7a/`, plus dv mode)
+
+Test: `dv_test <test/clips/male_harvard_8k.wav> <test/clips/female_harvard_8k.wav>`
+(frame sizes, silence, decoded level tracks the input on normal / quiet / loud
+speech with no clipping, reset, CPU per frame).
+
+Note: build from a short path (for example `C:\Users\<you>\qdvb\`). From a deep
+path the dynarmic checkout exceeds the Windows 260-character limit and the
+configure fails.

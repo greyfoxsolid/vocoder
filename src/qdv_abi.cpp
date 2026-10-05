@@ -23,7 +23,8 @@ bool g_initialized = false;
 
 const char kBuildId[] =
     "qso_dmr_vocoder/1.1.0 abi2 "
-    "(md380_vocoder_dynarmic@55c9a2c GPL; dynarmic@yuzu-mirror/9d45823 0BSD)";
+    "(md380_vocoder_dynarmic@55c9a2c GPL; dynarmic@yuzu-mirror/9d45823 0BSD; "
+    "xbyak-amd-legacy-fix@53be499)";
 } // namespace
 
 extern "C" {

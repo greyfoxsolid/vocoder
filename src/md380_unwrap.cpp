@@ -18,6 +18,29 @@
 
 #include "qso_dmr_vocoder.h"
 
+// B3 (TA2IW / F4LZT): the app hands us UTF-8 paths under %APPDATA% that include
+// the Windows profile name. A narrow fopen() on Windows resolves against the ANSI
+// code page and CANNOT open a path with non-ASCII characters (Turkish "boyacı",
+// French "Jean-François"), returning NULL -> QDV_ERR_UNWRAP_OPEN. Open via the
+// UTF-16 API instead so any Unicode path works. POSIX fopen is already UTF-8.
+#if defined(_WIN32)
+#include <windows.h>
+#include <string>
+static FILE* qdv_fopen_utf8(const char* path_utf8, const char* mode_ascii) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, nullptr, 0);
+    if (wlen <= 0) return nullptr;
+    std::wstring wpath((size_t)wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, &wpath[0], wlen);
+    wchar_t wmode[8] = {0};
+    for (int i = 0; mode_ascii[i] && i < 7; ++i) wmode[i] = (wchar_t)mode_ascii[i];
+    return _wfopen(wpath.c_str(), wmode);
+}
+#else
+static FILE* qdv_fopen_utf8(const char* path, const char* mode) {
+    return fopen(path, mode);
+}
+#endif
+
 // The MD380 OEM stream-cipher key (cyclic XOR), from md380tools md380-fw.py.
 static const unsigned char kMd380Key[1024] = {
     0x2e, 0xdf, 0x40, 0xb5, 0xbd, 0xda, 0x91, 0x35, 0x21, 0x42, 0xe3, 0xe2,
@@ -111,7 +134,7 @@ static const unsigned char kMd380Key[1024] = {
 // Reads wrapped_path (the MD-380-D2.32(AD).bin OEM image), writes the unwrapped
 // application image (D002.032.bin) to unwrapped_path. Returns a qdv_status.
 int qdv_unwrap_md380_impl(const char* wrapped_path, const char* unwrapped_path) {
-    FILE* f = fopen(wrapped_path, "rb");
+    FILE* f = qdv_fopen_utf8(wrapped_path, "rb");
     if (!f) return QDV_ERR_UNWRAP_OPEN;
     fseek(f, 0, SEEK_END);
     long wlen = ftell(f);
@@ -139,7 +162,7 @@ int qdv_unwrap_md380_impl(const char* wrapped_path, const char* unwrapped_path) 
     for (uint32_t i = 0; i < app_len; i++)
         app[i] = img[256 + i] ^ kMd380Key[i % klen];
 
-    FILE* o = fopen(unwrapped_path, "wb");
+    FILE* o = qdv_fopen_utf8(unwrapped_path, "wb");
     if (!o) return QDV_ERR_UNWRAP_WRITE;
     size_t wr = fwrite(app.data(), 1, app.size(), o);
     fclose(o);

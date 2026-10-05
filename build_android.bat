@@ -15,6 +15,8 @@ if "%BOOST_ROOT%"=="" set "BOOST_ROOT=%MOD%..\..\spike\dmr_vocoder\boost_1_88_0"
 echo === configure (arm64-v8a, android-24, c++_static) ===
 cmake -G Ninja -S "%MOD%." -B "%MOD%build-android" ^
   -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" ^
+  -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,max-page-size=16384" ^
   -DCMAKE_TOOLCHAIN_FILE="%NDK%\build\cmake\android.toolchain.cmake" ^
   -DANDROID_ABI=arm64-v8a ^
   -DANDROID_PLATFORM=android-24 ^

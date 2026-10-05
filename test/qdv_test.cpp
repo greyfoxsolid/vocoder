@@ -24,6 +24,11 @@
 #include <chrono>
 #include <string>
 
+#if defined(_WIN32)
+#define NOMINMAX // keep windows.h from clobbering std::min/std::max used below
+#include <windows.h> // MultiByteToWideChar / _wfopen for the non-ASCII path test
+#endif
+
 #include "qso_dmr_vocoder.h"
 
 static const int kSampleRate = 8000;
@@ -157,6 +162,31 @@ int main(int argc, char** argv) {
         printf("unwrap(missing) -> %d (expect %d QDV_ERR_UNWRAP_OPEN) %s\n",
                urc, QDV_ERR_UNWRAP_OPEN, urc==QDV_ERR_UNWRAP_OPEN?"OK":"FAIL");
         if (urc != QDV_ERR_UNWRAP_OPEN) fails++;
+    }
+    // B3 (TA2IW / F4LZT): a NON-ASCII path must OPEN. Write a >512-byte file with
+    // the OutSecurityBin magic to a path containing Turkish/French characters,
+    // then unwrap it. The content is not a full valid image, so the CORRECT result
+    // is QDV_ERR_UNWRAP_FORMAT (10) — the point is it is NOT QDV_ERR_UNWRAP_OPEN
+    // (9): the open SUCCEEDED. Against the pre-fix narrow fopen this returned 9
+    // (could not open the non-ASCII path); the wide-open fix returns 10.
+    {
+        const char* nonAscii = "unwrap_boyaci_François_\xC4\xB1.bin"; // UTF-8 ı + ç/ç
+        std::string np = outPath(nonAscii);
+        std::vector<uint8_t> synth(600, 0);
+        memcpy(synth.data(), "OutSecurityBin", 14);
+#if defined(_WIN32)
+        int wl = MultiByteToWideChar(CP_UTF8, 0, np.c_str(), -1, nullptr, 0);
+        std::wstring wp((size_t)wl, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, np.c_str(), -1, &wp[0], wl);
+        FILE* nf = _wfopen(wp.c_str(), L"wb");
+#else
+        FILE* nf = fopen(np.c_str(), "wb");
+#endif
+        if (nf) { fwrite(synth.data(), 1, synth.size(), nf); fclose(nf); }
+        int urc = qdv_unwrap_md380(np.c_str(), outPath("na_out.bin").c_str());
+        printf("unwrap(non-ASCII path) -> %d (must NOT be %d UNWRAP_OPEN) %s\n",
+               urc, QDV_ERR_UNWRAP_OPEN, urc!=QDV_ERR_UNWRAP_OPEN?"OK":"FAIL");
+        if (urc == QDV_ERR_UNWRAP_OPEN) fails++;
     }
     if (wrapped) {
         std::string outp = outPath("D002.032.fromwrap.bin");
