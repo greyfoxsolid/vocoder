@@ -152,6 +152,28 @@ EXCEPT these changes, each marked "QSO One local change" in the source:
    had; they now fade 6 dB per harmonic. Proof: `test/dv_test.cpp` section 9.
    The build id says `loudness-fix, pitch-fix, radio-pitch-scale, b8-fix,
    top-band-fade`. DMR / YSF mode and P25 stay byte-identical.
+7. **Chip-tuned D-Star** (2026-10-06 pm; `dstar_pitch.h`, `mbevocoder.cpp`,
+   `mbevocoder.h`, `ambe3600x2400.c`). Measured on a real DVSI AMBE-3000 (a DVMEGA
+   DVstick 30 used as a sealed box: audio and frames in, frames and audio out; no
+   DVSI code or firmware read or copied):
+   - the pitch scale is `f0 = 2^(-4.24734 - 0.021762 (b0 + 0.5))` exactly (0.3 cent
+     fit over codes 4..116); item 4's "two codes" rule held only near 190 Hz and is
+     replaced (`DSTAR_F0_C0`, `DSTAR_F0_C1`);
+   - the spectral prediction is 0.8, not mbelib's 0.65 (`DSTAR_SPEC_PRED`), in the
+     encoder's residual, its decoder model and the mbelib decoder (D-Star only;
+     DMR AMBE+2 keeps 0.65);
+   - the encoder smooths its frame loudness target (`DSTAR_GAIN_SMOOTH 0.55`, state per
+     encoder) and codes its loudness 1.8 log2 lower (`DSTAR_GAIN_ADJUST`), so a real
+     decoder plays our frames at the input level with a real encoder's frame-to-frame
+     movement;
+   - the D-Star decoder output is raised 5 dB (`DSTAR_OUT_GAIN_DB`) to a real decoder's
+     level.
+   Proof: `test/dv_test.cpp` sections 11-13 (pitch per code within 0.05 % of the chip;
+   loudness index 3.39 steps per frame, real encoder 3.9; real D-Star frames at -0.6 dB
+   of a real decoder with a 4.0 dB per-frame spread; before: 2.0 %, 6.96, -13.7 dB /
+   4.6 dB, all FAIL). The build id adds `chip-tuned`. DMR / YSF mode and P25 stay
+   byte-identical. `test/refframes/dstar_en_US_chip_level_db.txt` is the chip's
+   per-frame output level for the en_US prompt frames (a measurement, for section 13).
 
 The test files `test/refframes/dstar_en_US_ircddbgateway.ambe` (ircDDBGateway
 `Data/en_US.ambe`) and `test/refframes/dmr_en_US_dmrgateway.ambe` (DMRGateway

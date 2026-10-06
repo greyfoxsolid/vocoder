@@ -1,4 +1,4 @@
-/*
+﻿/*
  * dv_test.cpp - the D-Star / P25 (dv mode) codec test. GPL v3 or later.
  *
  * Proves, on whatever machine it runs on (Windows host, Android CLI):
@@ -20,11 +20,15 @@
  *      state after every frame (the b8 fix: before it, they split on most frames);
  *   9. (2026-10-06, optional args) on band-limited real speech the energy at
  *      3.7-4.0 kHz stays within +2 dB of the input (the top-band fade);
+ *  11. (2026-10-06 pm) our decoder plays each pitch code within 0.3 % of a real DVSI chip;
+ *  12. (2026-10-06 pm) the encoder moves the loudness index <= 5 steps per frame (chip 3.9);
+ *  13. (2026-10-06 pm, optional arg 5) real D-Star frames decode at a real DVSI decoder's
+ *      level (+/-3 dB) with a per-frame spread under 4.5 dB (chip reference file);
  *  10. (2026-10-06, optional args) REAL D-Star radio frames (G4KLX's en_US
  *      prompts) play at the pitch of the same recording in DMR AMBE+2 (the real-
  *      radio pitch scale: mbelib's "w0 guess" played them 3 % flat).
  *
- * Usage: dv_test <male_8k.wav> <female_8k.wav> [<dstar prompts> <dmr prompts>]
+ * Usage: dv_test <male_8k.wav> <female_8k.wav> [<dstar prompts> <dmr prompts> [<chip level ref>]]
  *        (the clips in test/clips/; the quiet and loud clips are derived;
  *        the prompt files in test/refframes/)
  * Exit 0 = PASS.
@@ -454,6 +458,111 @@ int main(int argc, char** argv) {
     double di = topBandDb(pdm), dout = topBandDb(o2);
     snprintf(m, sizeof m, "D-Star top band %+.1f dB vs input (in %.1f, out %.1f; limit +2)", dout - di, di, dout);
     check(dout - di <= 2.0, m);
+  }
+
+  // 11. THE CHIP-MEASURED PITCH SCALE (2026-10-06 afternoon). A real DVSI AMBE-3000
+  // (DVMEGA DVstick 30) decoding frames with the pitch code held at b0 played these
+  // pitches (Hz; harmonic comb fit, 0.3 cent fit residual). Our decoder must play each
+  // code within 0.3 %. The morning's "two codes" scale was 1.0-2.0 % off below 125 Hz
+  // and 1.0-1.4 % off above 300 Hz (FAIL); mbelib's guess was 1-4.4 % off.
+  {
+    static const int kB0[] = {4, 20, 36, 52, 68, 84, 100, 116};
+    static const double kChipHz[] = {393.55, 309.20, 242.86, 190.79, 149.84, 117.74, 92.53, 72.63};
+    printf("D-Star pitch per code vs a real DVSI chip (limit +/-0.3 %%)\n");
+    double worst = 0;
+    int worstB0 = -1;
+    for (int i = 0; i < 8; i++) {
+      // the w0 the decoder (mbe_decodeAmbe2400Parms) sets for a frame carrying code b0
+      char d[49];
+      memset(d, 0, sizeof d);
+      for (int k = 0; k < 6; k++) d[k] = (kB0[i] >> (6 - k)) & 1;
+      d[48] = kB0[i] & 1;
+      mbe_parms cur, prev, prevE;
+      mbe_initMbeParms(&cur, &prev, &prevE);
+      mbe_decodeAmbe2400Parms(d, &cur, &prev);
+      double hz = cur.w0 / (2 * M_PI) * 8000.0;
+      double err = std::fabs(hz / kChipHz[i] - 1.0);
+      if (err > worst) { worst = err; worstB0 = kB0[i]; }
+    }
+    char m[160];
+    snprintf(m, sizeof m, "decoder pitch per code within %.2f %% of the chip (worst at b0 %d)", worst * 100, worstB0);
+    check(worst <= 0.003, m);
+  }
+
+  // 12. THE ENCODER'S LOUDNESS MOVEMENT (2026-10-06 afternoon). On the same speech a real
+  // DVSI encoder moves the loudness index b2 3.9 steps per frame (mean |change|); ours moved
+  // 7.6, which the chip's decoder played as a 5.4 dB rms frame-to-frame loudness wobble (a
+  // real radio's own frames: 2.8). Limit 5.0 steps on the male clip.
+  {
+    MBEVocoder enc, dec;
+    int prev = -1;
+    double sum = 0;
+    size_t n = 0;
+    for (size_t f = 0; f + 1 <= male.size() / 160; f++) {
+      uint8_t fr[9];
+      int16_t out[160];
+      memset(fr, 0, sizeof fr);
+      enc.encode_2400x1200(&male[f * 160], fr);
+      dec.decode_2400x1200(out, fr);
+      const char* d = dec.ambe_d;
+      int b0 = (d[0] << 6) | (d[1] << 5) | (d[2] << 4) | (d[3] << 3) | (d[4] << 2) | (d[5] << 1) | d[48];
+      int b2 = (d[6] << 5) | (d[7] << 4) | (d[8] << 3) | (d[9] << 2) | (d[42] << 1) | d[43];
+      if (b0 >= 120) { prev = -1; continue; }
+      if (prev >= 0) { sum += std::abs(b2 - prev); n++; }
+      prev = b2;
+    }
+    char m[160];
+    snprintf(m, sizeof m, "D-Star loudness index moves %.2f steps per frame (real DVSI encoder 3.9; limit 5.0; %zu frames)",
+             n ? sum / n : 99.0, n);
+    check(n > 400 && sum / n <= 5.0, m);
+  }
+
+  // 13. OUR DECODER PLAYS REAL-RADIO FRAMES LIKE A REAL DECODER (2026-10-06 afternoon).
+  // Optional arg 5: the per-frame level a real DVSI AMBE-3000 gave the en_US prompt frames
+  // (test/refframes/dstar_en_US_chip_level_db.txt). Frame-aligned, active frames: our level
+  // minus the chip's must average within +/-3 dB with a per-frame spread under 4.5 dB.
+  // Before: -12.8 dB and 5.7 dB (mbelib's 0.65 spectral prediction; the chip uses 0.8).
+  if (argc >= 6) {
+    vector<uint8_t> ds = readFile(argv[3]);
+    FILE* f = fopen(argv[5], "r");
+    vector<double> ref;
+    if (f) {
+      char line[64];
+      while (fgets(line, sizeof line, f)) if (line[0] != '#') ref.push_back(atof(line));
+      fclose(f);
+    }
+    size_t o = (ds.size() >= 4 && !memcmp(ds.data(), "AMBE", 4)) ? 4 : 0;
+    MBEVocoder d1;
+    vector<double> ours;
+    for (size_t i = o; i + 9 <= ds.size(); i += 9) {
+      int16_t pcm[160];
+      uint8_t fr[9];
+      memcpy(fr, &ds[i], 9);
+      d1.decode_2400x1200(pcm, fr);
+      double e = 0;
+      for (int k = 0; k < 160; k++) e += (double)pcm[k] * pcm[k];
+      ours.push_back(10 * std::log10(e / 160 / (32768.0 * 32768.0) + 1e-12));
+    }
+    double mx = -999;
+    for (double v : ref) mx = std::max(mx, v);
+    double bestMean = 0, bestSd = 1e9;
+    for (int lag = -3; lag <= 3; lag++) {
+      double s = 0, s2 = 0;
+      size_t n = 0;
+      for (size_t i = 0; i < ref.size(); i++) {
+        long j = (long)i - lag;
+        if (j < 0 || j >= (long)ours.size() || ref[i] < mx - 30) continue;
+        double dd = ours[j] - ref[i];
+        s += dd; s2 += dd * dd; n++;
+      }
+      if (n < 500) continue;
+      double mean = s / n, sd = std::sqrt(std::max(0.0, s2 / n - mean * mean));
+      if (sd < bestSd) { bestSd = sd; bestMean = mean; }
+    }
+    char m[192];
+    snprintf(m, sizeof m, "real D-Star frames: our level minus a real DVSI decoder's %+.2f dB (limit +/-3), per-frame spread %.2f dB (limit 4.5)",
+             bestMean, bestSd);
+    check(ref.size() > 1000 && std::fabs(bestMean) <= 3.0 && bestSd <= 4.5, m);
   }
 
   // 6. CPU time per frame (all clips)

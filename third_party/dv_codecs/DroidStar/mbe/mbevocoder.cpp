@@ -225,6 +225,9 @@ static inline int load_reg(const uint8_t val[], int len)
 }
 
 // QSO One local change (2026-10-06, the real-radio pitch scale; listed in NOTICE.md).
+// UPDATED 2026-10-06 (afternoon): measured on a real DVSI AMBE-3000 chip, the D-Star
+// pitch for code b0 is 2^(-DSTAR_F0_C0 - DSTAR_F0_C1 (b0 + 0.5)) exactly (0.3 cent fit
+// over codes 4..116; dstar_pitch.h). The "two codes" rule below held only near 190 Hz.
 // The D-Star pitch code b0 -> pitch. mbelib's own comment calls its formula
 // f0 = 2^(-4.311767578125 - 0.021336 (b0 + 0.5)) a "w0 guess". Measured against real
 // DVSI D-Star encoders (G4KLX's ircDDBGateway prompt frames for 10 speakers, frame by
@@ -237,7 +240,7 @@ static inline int load_reg(const uint8_t val[], int len)
 // and the mbelib decoder (ambe3600x2400.c) alike.
 #include "dstar_pitch.h"
 inline float make_f0(int b0) {
-	return (powf(2, (-4.311767578125 - (2.1336e-2 * ((float)b0 + 0.5f - DSTAR_B0_SHIFT)))));
+	return powf(2, -DSTAR_F0_C0 - DSTAR_F0_C1 * ((float)b0 + 0.5f));
 }
 
 int
@@ -590,7 +593,7 @@ mbe_dequantizeAmbeParms (mbe_parms * cur_mp, mbe_parms * prev_mp, const int *b, 
       // eq 43
       Sum43 = Sum43 + ((((float) 1 - deltal[l]) * prev_mp->log2Ml[intkl[l]]) + (deltal[l] * prev_mp->log2Ml[intkl[l] + 1]));
     }
-  Sum43 = (((float) 0.65 / (float) cur_mp->L) * Sum43);
+  Sum43 = (((dstar ? DSTAR_SPEC_PRED : 0.65f) / (float) cur_mp->L) * Sum43);	// QSO One: D-Star 0.8 (dstar_pitch.h)
 #ifdef AMBE_DEBUG
   fprintf (stderr, "\n");
   fprintf (stderr, "Sum43: %f\n", Sum43);
@@ -609,8 +612,8 @@ mbe_dequantizeAmbeParms (mbe_parms * cur_mp, mbe_parms * prev_mp, const int *b, 
   // Part 3
   for (l = 1; l <= cur_mp->L; l++)
     {
-      c1 = ((float) 0.65 * ((float) 1 - deltal[l]) * prev_mp->log2Ml[intkl[l]]);
-      c2 = ((float) 0.65 * deltal[l] * prev_mp->log2Ml[intkl[l] + 1]);
+      c1 = ((dstar ? DSTAR_SPEC_PRED : 0.65f) * ((float) 1 - deltal[l]) * prev_mp->log2Ml[intkl[l]]);
+      c2 = ((dstar ? DSTAR_SPEC_PRED : 0.65f) * deltal[l] * prev_mp->log2Ml[intkl[l] + 1]);
       cur_mp->log2Ml[l] = Tl[l] + c1 + c2 - Sum43 + BigGamma;
       // inverse log to generate spectral amplitudes
       if (cur_mp->Vl[l] == 1)
@@ -645,7 +648,7 @@ mbe_dequantizeAmbe2250Parms (mbe_parms * cur_mp, mbe_parms * prev_mp, const int 
 }
 
 
-void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_parms*prev_mp, bool dstar, float gain_adjust) {
+void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_parms*prev_mp, bool dstar, float gain_adjust, float *gain_state = nullptr) {
 	static const float SQRT_2 = sqrtf(2.0);
 	static const int b0_lmax = sizeof(b0_lookup) / sizeof(b0_lookup[0]);
 	// int b[9];
@@ -675,7 +678,7 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 		// 2026-10-06: make_f0() is now the real-radio scale (dstar_pitch.h), so the
 		// nearest code is the formula's code plus DSTAR_B0_SHIFT.
 		float f0_in = 256.0f / (float) imbe_param->ref_pitch;	// cycles per sample
-		int b0 = (int) lrintf((-log2f(f0_in) - 4.311767578125f) / 2.1336e-2f - 0.5f + DSTAR_B0_SHIFT);
+		int b0 = (int) lrintf((-log2f(f0_in) - DSTAR_F0_C0) / DSTAR_F0_C1 - 0.5f);	// nearest code on the chip-measured scale
 		if (b0 < 0) b0 = 0;
 		if (b0 > 119) b0 = 119;	// 120..127 are erasure / silence / tone codes
 		b[0] = b0;
@@ -802,6 +805,17 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 	}
 
 	float gain = lsa_sum / num_harms_f;
+	// QSO One local change (2026-10-06, the D-Star gain smoothing; NOTICE.md). The IMBE
+	// analysis' frame loudness jitters with where the pitch pulses fall; coded as is, our
+	// loudness index moved 7.6 steps per frame against a real DVSI encoder's 3.9 on the same
+	// speech, and a real decoder (DVSI AMBE-3000) played that as a 5.4 dB rms frame-to-frame
+	// loudness wobble ("pulsing"; a real radio's own frames: 2.8). Smoothing the target
+	// (weight DSTAR_GAIN_SMOOTH on the previous frame) gives the real encoder's movement
+	// (3.85 steps) and 2.2 dB on the chip. D-Star only; state per encoder (reset with it).
+	if (dstar && gain_state) {
+		if (*gain_state > -98.0f) gain = DSTAR_GAIN_SMOOTH * (*gain_state) + (1.0f - DSTAR_GAIN_SMOOTH) * gain;
+		*gain_state = gain;
+	}
 	float diff_gain;
 	// QSO One local change (2026-10-05, the D-Star loudness fix; listed in
 	// NOTICE.md). Upstream (DroidStar c6a4c54, from OP25 ambe_encoder.cc) did
@@ -853,8 +867,9 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 		float kl = l_prev_l * (float)(i1+1);
 		int kl_floor = (int) kl;
 		float kl_frac = kl - kl_floor;
-		T[i1] = lsa[i1] - 0.65 * (1.0 - kl_frac) * prev_mp->log2Ml[kl_floor  +0]	\
-				- 0.65 * kl_frac * prev_mp->log2Ml[kl_floor+1  +0];
+		const float pc = dstar ? DSTAR_SPEC_PRED : 0.65f;	// QSO One: D-Star spectral prediction 0.8 (dstar_pitch.h)
+		T[i1] = lsa[i1] - pc * (1.0 - kl_frac) * prev_mp->log2Ml[kl_floor  +0]	\
+				- pc * kl_frac * prev_mp->log2Ml[kl_floor+1  +0];
 	}
 
 	// DCT
@@ -1077,6 +1092,7 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 
 		initMbeParms();
 		memset(ambe_d, 0, 49);
+		m_dstar_gain_s = -99.0f;	// QSO One: D-Star gain smoothing state (none yet)
 	}
 	
     MBEVocoder::~MBEVocoder()
@@ -1126,7 +1142,7 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 		int tbufp = 0;
 		
 		vocoder.imbe_encode(frame_vector, pcm);
-		encode_ambe(vocoder.param(), b, m_mbelibParms->m_cur_mp, m_mbelibParms->m_prev_mp, true, 1.0);
+		encode_ambe(vocoder.param(), b, m_mbelibParms->m_cur_mp, m_mbelibParms->m_prev_mp, true, DSTAR_GAIN_ADJUST, &m_dstar_gain_s);
 		b[8] >>= 1;	// QSO One b8 fix: the 3 sent bits are b8's top bits (see encode_ambe)
 
 		for (int i=0; i < 9; i++) {
@@ -1306,6 +1322,9 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 		}
 
 		mbe_processAmbe3600x2400Framef(m_audio_out_temp_buf, &m_errs2, m_err_str, ambe_fr, ambe_d,m_mbelibParms-> m_cur_mp, m_mbelibParms->m_prev_mp, m_mbelibParms->m_prev_mp_enhanced, 3);
+		// QSO One (2026-10-06): D-Star output gain to the real decoder's level (dstar_pitch.h)
+		static const float kOut = powf(10.0f, DSTAR_OUT_GAIN_DB / 20.0f);
+		for (int i = 0; i < 160; i++) m_audio_out_temp_buf[i] *= kOut;
 		processAudio();
 	}
 

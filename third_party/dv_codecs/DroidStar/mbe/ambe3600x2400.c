@@ -276,7 +276,8 @@ mbe_decodeAmbe2400Parms (char *ambe_d, mbe_parms * cur_mp, mbe_parms * prev_mp)
       // QSO One local change (2026-10-06, NOTICE.md): real D-Star radios play code
       // b0 at the guess's pitch for b0 - DSTAR_B0_SHIFT (3.0 % higher), measured
       // against real DVSI encoders (dstar_pitch.h). Was: (float)b0+0.5
-      f0 = powf(2, (-4.311767578125 - (2.1336e-2 * ((float)b0 + 0.5f - DSTAR_B0_SHIFT))));
+      // UPDATED (afternoon): the chip-measured scale, exact (dstar_pitch.h)
+      f0 = powf(2, -DSTAR_F0_C0 - DSTAR_F0_C1 * ((float)b0 + 0.5f));
       cur_mp->w0 = f0 * (float) 2 *M_PI;
     }
 
@@ -580,7 +581,7 @@ mbe_decodeAmbe2400Parms (char *ambe_d, mbe_parms * cur_mp, mbe_parms * prev_mp)
       // eq 43
       Sum43 = Sum43 + ((((float) 1 - deltal[l]) * prev_mp->log2Ml[intkl[l]]) + (deltal[l] * prev_mp->log2Ml[intkl[l] + 1]));
     }
-  Sum43 = (((float) 0.65 / (float) cur_mp->L) * Sum43);
+  Sum43 = ((DSTAR_SPEC_PRED / (float) cur_mp->L) * Sum43);	// QSO One: 0.8, measured on a real chip (dstar_pitch.h)
 #ifdef AMBE_DEBUG
   printf ("\n");
   printf ("Sum43: %f\n", Sum43);
@@ -599,8 +600,8 @@ mbe_decodeAmbe2400Parms (char *ambe_d, mbe_parms * cur_mp, mbe_parms * prev_mp)
   // Part 3
   for (l = 1; l <= cur_mp->L; l++)
     {
-      c1 = ((float) 0.65 * ((float) 1 - deltal[l]) * prev_mp->log2Ml[intkl[l]]);
-      c2 = ((float) 0.65 * deltal[l] * prev_mp->log2Ml[intkl[l] + 1]);
+      c1 = (DSTAR_SPEC_PRED * ((float) 1 - deltal[l]) * prev_mp->log2Ml[intkl[l]]);
+      c2 = (DSTAR_SPEC_PRED * deltal[l] * prev_mp->log2Ml[intkl[l] + 1]);
       cur_mp->log2Ml[l] = Tl[l] + c1 + c2 - Sum43 + BigGamma;
       // inverse log to generate spectral amplitudes
       if (cur_mp->Vl[l] == 1)
