@@ -136,9 +136,11 @@ endif()
 # Level-tracking + frame-format test for the dv codecs (host and Android CLI).
 add_executable(dv_test test/dv_test.cpp)
 target_link_libraries(dv_test PRIVATE qso_dv_codecs)
+# dv_test sections 8 and 10 drive the vendored coder class directly.
+target_include_directories(dv_test PRIVATE ${QDV_DS} ${QDV_DS}/mbe ${QDV_DS}/imbe_vocoder)
 set_target_properties(dv_test PROPERTIES CXX_STANDARD 17)
 if(MSVC)
-    target_compile_definitions(dv_test PRIVATE _USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(dv_test PRIVATE _USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS _ALLOW_KEYWORD_MACROS)
 endif()
 
 if(ANDROID OR WIN32)

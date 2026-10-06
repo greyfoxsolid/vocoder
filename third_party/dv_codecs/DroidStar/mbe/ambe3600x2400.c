@@ -21,6 +21,7 @@
 
 #include "mbelib.h"
 #include "ambe3600x2400_const.h"
+#include "dstar_pitch.h"  /* QSO One local change (2026-10-06): the real-radio pitch scale */
 
 void
 mbe_dumpAmbe2400Data (char *ambe_d)
@@ -271,8 +272,11 @@ mbe_decodeAmbe2400Parms (char *ambe_d, mbe_parms * cur_mp, mbe_parms * prev_mp)
       //cur_mp->w0 = f0 * (float) 2 *M_PI;
       // w0 from patent filings
       //f0 = powf (2, ((float) b0 + (float) 195.626) / -(float) 46.368); // was 45.368
-      // w0 guess  
-      f0 = powf(2, (-4.311767578125 - (2.1336e-2 * ((float)b0+0.5))));
+      // w0 guess
+      // QSO One local change (2026-10-06, NOTICE.md): real D-Star radios play code
+      // b0 at the guess's pitch for b0 - DSTAR_B0_SHIFT (3.0 % higher), measured
+      // against real DVSI encoders (dstar_pitch.h). Was: (float)b0+0.5
+      f0 = powf(2, (-4.311767578125 - (2.1336e-2 * ((float)b0 + 0.5f - DSTAR_B0_SHIFT))));
       cur_mp->w0 = f0 * (float) 2 *M_PI;
     }
 

@@ -16,9 +16,17 @@
  *   7. THE D-STAR PITCH FIX: the decoded voice keeps the input pitch within
  *      +/-1.5 % (before the fix D-Star played every voice 2.5 to 5 % sharp,
  *      the "chipmunk" echo on XLX073 E, so reverting the fix fails this test).
+ *   8. (2026-10-06) the encoder's model of the decoder equals mbelib's decoder
+ *      state after every frame (the b8 fix: before it, they split on most frames);
+ *   9. (2026-10-06, optional args) on band-limited real speech the energy at
+ *      3.7-4.0 kHz stays within +2 dB of the input (the top-band fade);
+ *  10. (2026-10-06, optional args) REAL D-Star radio frames (G4KLX's en_US
+ *      prompts) play at the pitch of the same recording in DMR AMBE+2 (the real-
+ *      radio pitch scale: mbelib's "w0 guess" played them 3 % flat).
  *
- * Usage: dv_test <male_8k.wav> <female_8k.wav>
- *        (the clips in test/clips/; the quiet and loud clips are derived)
+ * Usage: dv_test <male_8k.wav> <female_8k.wav> [<dstar prompts> <dmr prompts>]
+ *        (the clips in test/clips/; the quiet and loud clips are derived;
+ *        the prompt files in test/refframes/)
  * Exit 0 = PASS.
  */
 
@@ -32,9 +40,58 @@
 #include <vector>
 
 #include "dv_codec_core.h"
+// Sections 8 and 10 use the vendored coder class directly (its decoder state is
+// private; the test reads it to compare the encoder's model with the decoder).
+#include <cinttypes>
+#define private public
+#include "mbevocoder.h"
+#include "mbelib.h"
+#undef private
 
 using std::vector;
 using namespace qdv_dv;
+
+static vector<uint8_t> readFile(const char* path) {
+  vector<uint8_t> b;
+  FILE* f = fopen(path, "rb");
+  if (!f) return b;
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  b.resize(n > 0 ? (size_t)n : 0);
+  if (n > 0) fread(b.data(), 1, (size_t)n, f);
+  fclose(f);
+  return b;
+}
+
+// Energy at 3.7-4.0 kHz relative to 0.3-3.0 kHz (dB), over the active 32 ms blocks.
+static double topBandDb(const vector<int16_t>& x) {
+  const int N = 256;
+  double top = 0, ref = 0, emax = 0;
+  vector<double> e;
+  for (size_t s = 0; s + N <= x.size(); s += N) {
+    double v = 0;
+    for (int i = 0; i < N; i++) v += (double)x[s + i] * x[s + i];
+    e.push_back(v);
+    emax = std::max(emax, v);
+  }
+  for (size_t b = 0; b < e.size(); b++) {
+    if (e[b] < emax * 1e-3) continue;
+    for (int k = 1; k < N / 2; k++) {
+      double re = 0, im = 0;
+      for (int i = 0; i < N; i++) {
+        double w = 0.5 - 0.5 * cos(2 * M_PI * i / N);
+        double v = x[b * N + i] * w;
+        re += v * cos(2 * M_PI * k * i / N);
+        im -= v * sin(2 * M_PI * k * i / N);
+      }
+      double p = re * re + im * im, hz = k * 8000.0 / N;
+      if (hz >= 300 && hz < 3000) ref += p;
+      if (hz >= 3700 && hz < 4000) top += p;
+    }
+  }
+  return 10 * log10(top / (ref + 1e-30) + 1e-30);
+}
 
 static const double kTrackDb = 4.0;      // |out - in| active level, dB
 static const size_t kLoudClipMax = 50;   // samples at full scale (was ~8700)
@@ -314,6 +371,89 @@ int main(int argc, char** argv) {
                clips[ci].name, q, used);
       check(used >= 100 && std::fabs(q - 1.0) <= kPitchTol, m);
     }
+  }
+
+  // 8. THE ENCODER'S MODEL OF THE DECODER IS THE DECODER (2026-10-06). The encoder
+  // predicts each frame from its own copy of the decoder state; if that copy differs
+  // from what a real decoder computes from the same bits, every later frame is coded
+  // against the wrong history. Before the b8 fix the encoder searched 16 entries for
+  // b8 but sent only its LOW three bits while decoders read them as the TOP three, so
+  // the two states split on most frames. Decoder = mbelib's own D-Star decoder.
+  printf("encoder model vs decoder (spectral state after every frame)\n");
+  for (int ci = 0; ci < 2; ci++) {
+    MBEVocoder enc, dec;
+    size_t frames = 0, split = 0;
+    double worst = 0;
+    for (size_t f = 0; f + 1 <= clips[ci].pcm.size() / 160; f++) {
+      int16_t in[160], out[160];
+      memcpy(in, &clips[ci].pcm[f * 160], sizeof in);
+      uint8_t fr[9];
+      memset(fr, 0, sizeof fr);
+      enc.encode_2400x1200(in, fr);
+      dec.decode_2400x1200(out, fr);
+      const mbe_parms* a = enc.m_mbelibParms->m_prev_mp;
+      const mbe_parms* b = dec.m_mbelibParms->m_prev_mp;
+      if (a->L != b->L || std::fabs(a->w0 - b->w0) > 1e-5f) { split++; frames++; continue; }
+      double d = 0;
+      for (int l = 1; l <= a->L; l++) d = std::max(d, (double)std::fabs(a->log2Ml[l] - b->log2Ml[l]));
+      worst = std::max(worst, d);
+      if (d > 0.01) split++;
+      frames++;
+    }
+    char m[192];
+    snprintf(m, sizeof m, "D-Star %s: encoder state == decoder state on %zu of %zu frames (worst %.4f)",
+             clips[ci].name, frames - split, frames, worst);
+    check(split == 0, m);
+  }
+
+  // 10. THE REAL-RADIO PITCH SCALE (2026-10-06). Optional args 3 and 4: G4KLX's en_US
+  // voice prompts as made by real DVSI encoders, D-Star (ircDDBGateway) and DMR AMBE+2
+  // (DMRGateway), the SAME recording (test/refframes/). The DMR pitch scale is exact
+  // (DVSI's MD-380 firmware round-trips it at 0.999), so the D-Star frames, played by
+  // our decoder, must come out at the DMR rendition's pitch. mbelib's "w0 guess" played
+  // them 3 % flat (0.97); the real-radio scale plays them at 1.00.
+  if (argc >= 5) {
+    printf("real D-Star radio frames vs the same recording in DMR (pitch, limit +/-1.5 %%)\n");
+    vector<uint8_t> ds = readFile(argv[3]), dm = readFile(argv[4]);
+    size_t o = (ds.size() >= 4 && !memcmp(ds.data(), "AMBE", 4)) ? 4 : 0;
+    MBEVocoder d1, d2;
+    vector<int16_t> pds, pdm;
+    for (size_t i = o; i + 9 <= ds.size(); i += 9) {
+      int16_t pcm[160];
+      uint8_t f[9];
+      memcpy(f, &ds[i], 9);
+      memset(pcm, 0, sizeof pcm);
+      d1.decode_2400x1200(pcm, f);
+      pds.insert(pds.end(), pcm, pcm + 160);
+    }
+    for (size_t i = 0; i + 9 <= dm.size(); i += 9) {
+      int16_t pcm[160];
+      uint8_t f[9];
+      memcpy(f, &dm[i], 9);
+      memset(pcm, 0, sizeof pcm);
+      d2.decode_2450x1150(pcm, f);
+      pdm.insert(pdm.end(), pcm, pcm + 160);
+    }
+    // the D-Star file runs 14 frames (280 ms) ahead of the DMR file
+    if (pds.size() > 14 * 160) pds.erase(pds.begin(), pds.begin() + 14 * 160);
+    size_t used = 0;
+    double q = pitchRatio(pdm, pds, &used);
+    char m[160];
+    snprintf(m, sizeof m, "real D-Star frames play at %.3f x the DMR rendition's pitch (%zu voiced hops)", q, used);
+    check(used >= 300 && std::fabs(q - 1.0) <= kPitchTol, m);
+
+    // 9. THE TOP-BAND FADE (2026-10-06), on band-limited real speech (the DMR
+    // rendition above: a real voice, nothing above ~3.7 kHz, like a microphone
+    // resampled to 8 kHz). The decoder's top harmonics reach 3.9-4.0 kHz but the
+    // IMBE analysis stops near 3.7 kHz; holding the last analysed amplitude up
+    // there put more energy at 3.7-4.0 kHz than the input had (+3 dB on this clip,
+    // +7 to +19 dB on other real speakers). Limit: +2 dB (fixed: -1.5 Windows, +0.8 Android).
+    printf("top band 3.7-4.0 kHz (relative to 0.3-3 kHz) on band-limited real speech\n");
+    Timing ta, tb;
+    vector<int16_t> o2 = roundTrip(kDstar, pdm, ta, tb);
+    double di = topBandDb(pdm), dout = topBandDb(o2);
+    snprintf(m, sizeof m, "D-Star top band %+.1f dB vs input (in %.1f, out %.1f; limit +2)", dout - di, di, dout);
+    check(dout - di <= 2.0, m);
   }
 
   // 6. CPU time per frame (all clips)

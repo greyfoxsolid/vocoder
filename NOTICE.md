@@ -128,6 +128,35 @@ EXCEPT these changes, each marked "QSO One local change" in the source:
    `test/dv_test.cpp` section 7 (decoded pitch within 1.5 % of the input; with the
    upstream lines restored it fails at +4.3 % male / +2.8 % female). The helper's
    build id says `loudness-fix, pitch-fix`.
+4. **The real-radio D-Star pitch scale** (2026-10-06; new file
+   `DroidStar/mbe/dstar_pitch.h`, used in `mbevocoder.cpp` `make_f0()`, the
+   dequantizer and `encode_ambe()`, and in `DroidStar/mbe/ambe3600x2400.c`, the
+   mbelib decoder). mbelib's D-Star pitch formula is its own "w0 guess". Measured
+   against real DVSI D-Star encoders (G4KLX's ircDDBGateway voice prompts, 10
+   speakers, frame by frame against the same recordings in DMR AMBE+2 and P25
+   IMBE, whose pitch scales are exact), real radios play code `b0` at the guess's
+   pitch for `b0 - 2` (3.0 % higher). Encoder and decoder now both use that scale
+   (`DSTAR_B0_SHIFT 2.0f`). Proof: `test/dv_test.cpp` section 10 (real D-Star
+   frames decode at 0.996 x the DMR rendition's pitch; 0.967 before).
+5. **The b8 fix** (`mbevocoder.cpp`, `encode_ambe()` and `encode_2400x1200()`,
+   2026-10-06). A D-Star frame carries three bits of `b8`, which decoders read as
+   the TOP three (mbelib: `b8 = bits << 1`). Upstream searched all 16 entries and
+   sent the LOW three bits, so the decoder used another entry than the encoder chose
+   and the encoder's model of the decoder split from the real decoder on every
+   frame. Now D-Star searches the even entries and sends `b8 >> 1`. Proof:
+   `test/dv_test.cpp` section 8 (encoder state equals mbelib's decoder state on
+   every frame; 0 of 485 frames before).
+6. **The top-band fade** (`mbevocoder.cpp`, `encode_ambe()`, 2026-10-06). Decoder
+   harmonics above the IMBE analysis band (~3.7 kHz) took the last analysed
+   amplitude, putting 7 to 19 dB more energy at 3.7-4.0 kHz than band-limited input
+   had; they now fade 6 dB per harmonic. Proof: `test/dv_test.cpp` section 9.
+   The build id says `loudness-fix, pitch-fix, radio-pitch-scale, b8-fix,
+   top-band-fade`. DMR / YSF mode and P25 stay byte-identical.
+
+The test files `test/refframes/dstar_en_US_ircddbgateway.ambe` (ircDDBGateway
+`Data/en_US.ambe`) and `test/refframes/dmr_en_US_dmrgateway.ambe` (DMRGateway
+`Audio/en_US.ambe`) are Jonathan Naylor G4KLX's voice prompts, GPL v2 or later,
+copied unmodified from his public repositories for the real-radio pitch test.
 
 ### The armeabi-v7a (32-bit ARM) helper
 

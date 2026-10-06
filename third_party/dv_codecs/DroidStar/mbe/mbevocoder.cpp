@@ -224,8 +224,20 @@ static inline int load_reg(const uint8_t val[], int len)
 	return acc;
 }
 
+// QSO One local change (2026-10-06, the real-radio pitch scale; listed in NOTICE.md).
+// The D-Star pitch code b0 -> pitch. mbelib's own comment calls its formula
+// f0 = 2^(-4.311767578125 - 0.021336 (b0 + 0.5)) a "w0 guess". Measured against real
+// DVSI D-Star encoders (G4KLX's ircDDBGateway prompt frames for 10 speakers, frame by
+// frame against the SAME recordings in DMR AMBE+2 and P25 IMBE, both of which have
+// exact public scales, and against the DVSI-decoded audio itself), real radios'
+// pitch for a code is the formula's pitch for the code TWO STEPS LOWER (3.0 % higher;
+// measured 2.8 to 3.6 %, no drift across the pitch range). Encoding the same speech,
+// our encoder now picks the same codes as the real encoder (median difference 0.0
+// steps, was +2.0). DSTAR_B0_SHIFT is used by the encoder, its internal decoder model
+// and the mbelib decoder (ambe3600x2400.c) alike.
+#include "dstar_pitch.h"
 inline float make_f0(int b0) {
-	return (powf(2, (-4.311767578125 - (2.1336e-2 * ((float)b0+0.5)))));
+	return (powf(2, (-4.311767578125 - (2.1336e-2 * ((float)b0 + 0.5f - DSTAR_B0_SHIFT)))));
 }
 
 int
@@ -295,7 +307,7 @@ mbe_dequantizeAmbeParms (mbe_parms * cur_mp, mbe_parms * prev_mp, const int *b, 
   if (silence == 0)
     {
       if (dstar)
-        f0 = powf(2, (-4.311767578125 - (2.1336e-2 * ((float)b0+0.5))));
+        f0 = make_f0(b0);	// QSO One: the real-radio scale (dstar_pitch.h)
       else
       // w0 from specification document
         f0 = AmbeW0table[b0];
@@ -660,8 +672,10 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 		// nearest make_f0() pitch to the measured pitch, take the decoder's own
 		// harmonic count L for that b0, and resample the IMBE harmonics
 		// (amplitude and voicing) onto the decoder's L harmonics.
+		// 2026-10-06: make_f0() is now the real-radio scale (dstar_pitch.h), so the
+		// nearest code is the formula's code plus DSTAR_B0_SHIFT.
 		float f0_in = 256.0f / (float) imbe_param->ref_pitch;	// cycles per sample
-		int b0 = (int) lrintf((-log2f(f0_in) - 4.311767578125f) / 2.1336e-2f - 0.5f);
+		int b0 = (int) lrintf((-log2f(f0_in) - 4.311767578125f) / 2.1336e-2f - 0.5f + DSTAR_B0_SHIFT);
 		if (b0 < 0) b0 = 0;
 		if (b0 > 119) b0 = 119;	// 120..127 are erasure / silence / tone codes
 		b[0] = b0;
@@ -675,7 +689,15 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 			if (k <= 1.0f) {
 				a = (float) imbe_param->sa[0];
 			} else if (k >= (float) n_in) {
-				a = (float) imbe_param->sa[n_in - 1];
+				// QSO One local change (2026-10-06, the top-band fade; NOTICE.md).
+				// The decoder's top harmonics reach 3.9 to 4.0 kHz but the IMBE
+				// analysis stops at ~3.7 kHz. Holding the last analysed amplitude
+				// up there put 7 to 19 dB MORE energy at 3.7-4.0 kHz than the input
+				// had on band-limited speech (a real microphone resampled to 8 kHz;
+				// measured on 5 real speakers; a fizz on top of the voice). Fade
+				// 6 dB per harmonic past the analysed band instead (whole-band
+				// log-spectral distance to the input: 8.19 -> 8.05 dB over 7 voices).
+				a = (float) imbe_param->sa[n_in - 1] * exp2f(-1.0f * (k - (float) n_in));
 			} else {
 				int k0 = (int) k;	// 1-based lower neighbour
 				float fr = k - (float) k0;
@@ -1009,7 +1031,15 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 		b[4+ii] = 0.0;
 	} else {
 		int max_8 = (dstar) ? 16 : 8;
-		for (int n=0; n < max_8; n++) {
+		// QSO One local change (2026-10-06, the b8 fix; NOTICE.md). A D-Star frame
+		// carries only THREE bits of b8 and every decoder reads them as the top bits
+		// (mbelib: b8 = bits << 1, "the least significant bit ... is forced to 0").
+		// Upstream searched all 16 entries and sent the LOW three bits, so the
+		// decoder used a different entry than the encoder chose on 15 of 16 picks,
+		// and the encoder's own model of the decoder drifted from the real one.
+		// Search the even entries only; encode_2400x1200 sends b8 >> 1.
+		const int step_8 = (dstar) ? 2 : 1;
+		for (int n=0; n < max_8; n += step_8) {
 			float err=0.0;
 			float diff;
 			for (int j=1; j <= J[ii-1]-2 && j <= 4; j++) {
@@ -1097,7 +1127,8 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 		
 		vocoder.imbe_encode(frame_vector, pcm);
 		encode_ambe(vocoder.param(), b, m_mbelibParms->m_cur_mp, m_mbelibParms->m_prev_mp, true, 1.0);
-		
+		b[8] >>= 1;	// QSO One b8 fix: the 3 sent bits are b8's top bits (see encode_ambe)
+
 		for (int i=0; i < 9; i++) {
 			store_reg(b[i], &tbuf[tbufp], b_lengths[i]);
 			tbufp += b_lengths[i];

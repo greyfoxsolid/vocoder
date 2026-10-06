@@ -49,7 +49,8 @@ constexpr uint8_t kDvProtoVersion = 1;
 constexpr uint8_t kDvCaps = 0x03;  // D-Star + P25
 constexpr int kMaxFrames = 50;     // 1 s of audio per request
 constexpr const char* kDvBuildId =
-    "qso_dv proto=1 dstar=ambe3600x2400(DroidStar c6a4c54, loudness-fix, pitch-fix) "
+    "qso_dv proto=1 dstar=ambe3600x2400(DroidStar c6a4c54, loudness-fix, pitch-fix, "
+    "radio-pitch-scale, b8-fix, top-band-fade) "
     "p25=imbe7200x4400(Yazev) mbelib=1.3.0";
 
 volatile const char** g_dvStep = nullptr;
