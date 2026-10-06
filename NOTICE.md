@@ -113,6 +113,21 @@ EXCEPT these changes, each marked "QSO One local change" in the source:
 2. **Leak fix** (`DroidStar/mbe/mbevocoder.cpp`, `~MBEVocoder()`): free the
    parameter block the constructor allocates (upstream leaked it; dv mode makes a
    fresh coder at every reset).
+3. **The D-Star pitch fix** (`DroidStar/mbe/mbevocoder.cpp`, `encode_ambe()`,
+   2026-10-05). Upstream (from OP25 `ambe_encoder.cc`) chose the pitch index
+   `b0` with `b0_lookup[]`, a table built for the DMR / AMBE+2 pitch table
+   `AmbeW0table`, then moved `b0` until `AmbePlusLtable[b0]` equalled the IMBE
+   harmonic count. A D-Star decoder (mbelib, and this encoder's own dequantizer)
+   turns `b0` into a pitch with `f0 = 2^(-4.311767578125 - 0.021336 (b0 + 0.5))`,
+   2 to 6 % higher than `AmbeW0table` for the same `b0`, so every voice played
+   back 2.5 to 5 % sharp with its formants shifted up the same amount (heard as a
+   "chipmunk" echo on XLX073 E). Now D-Star `b0` is the nearest decoder pitch to
+   the measured pitch, `L` is the decoder's own harmonic count for that `b0`, and
+   the IMBE harmonic amplitudes and voicing are resampled onto those `L`
+   harmonics. DMR mode and P25 are unchanged (byte-identical output). Proof:
+   `test/dv_test.cpp` section 7 (decoded pitch within 1.5 % of the input; with the
+   upstream lines restored it fails at +4.3 % male / +2.8 % female). The helper's
+   build id says `loudness-fix, pitch-fix`.
 
 ### The armeabi-v7a (32-bit ARM) helper
 

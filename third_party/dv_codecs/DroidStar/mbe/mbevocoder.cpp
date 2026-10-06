@@ -638,6 +638,61 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 	static const int b0_lmax = sizeof(b0_lookup) / sizeof(b0_lookup[0]);
 	// int b[9];
 
+	int L;
+	// The harmonics the rest of this function codes: their count (nh), their
+	// amplitudes (sa_w) and voicing (vuv_w). For DMR they are the IMBE
+	// analysis' own values, unchanged.
+	int nh = imbe_param->num_harms;
+	float sa_w[NUM_HARMS_MAX];
+	short vuv_w[NUM_HARMS_MAX];
+	if (dstar) {
+		// QSO One local change (2026-10-05, the D-Star pitch fix; listed in
+		// NOTICE.md). Upstream (DroidStar c6a4c54, from OP25 ambe_encoder.cc)
+		// picked b0 with b0_lookup[], a table built for the DMR/AMBE+2 pitch
+		// table AmbeW0table, then nudged b0 until AmbePlusLtable[b0] equalled
+		// the IMBE harmonic count. But a D-Star decoder turns b0 into a pitch
+		// with make_f0() (mbelib: f0 = 2^(-4.311767578125 - 0.021336 (b0+0.5))),
+		// which is 2 to 6 % HIGHER than AmbeW0table for the same b0, and the
+		// harmonic-count nudge pins b0 to the DMR value. So every D-Star frame
+		// this encoder made played back 2 to 6 % sharp (about 4 % on a male
+		// voice), pitch and voice formants together: the "chipmunk" sound
+		// (QSO One echo test, XLX073 E, 2026-10-05). Fix: pick b0 as the
+		// nearest make_f0() pitch to the measured pitch, take the decoder's own
+		// harmonic count L for that b0, and resample the IMBE harmonics
+		// (amplitude and voicing) onto the decoder's L harmonics.
+		float f0_in = 256.0f / (float) imbe_param->ref_pitch;	// cycles per sample
+		int b0 = (int) lrintf((-log2f(f0_in) - 4.311767578125f) / 2.1336e-2f - 0.5f);
+		if (b0 < 0) b0 = 0;
+		if (b0 > 119) b0 = 119;	// 120..127 are erasure / silence / tone codes
+		b[0] = b0;
+		L = (int) AmbePlusLtable[b0];
+		float f0_c = make_f0(b0);
+		const int n_in = imbe_param->num_harms;
+		for (int l = 1; l <= L; l++) {
+			// position of the decoder's harmonic l on the IMBE harmonic axis (1-based)
+			float k = (float) l * f0_c / f0_in;
+			float a;
+			if (k <= 1.0f) {
+				a = (float) imbe_param->sa[0];
+			} else if (k >= (float) n_in) {
+				a = (float) imbe_param->sa[n_in - 1];
+			} else {
+				int k0 = (int) k;	// 1-based lower neighbour
+				float fr = k - (float) k0;
+				float a0 = (float) imbe_param->sa[k0 - 1];
+				float a1 = (float) imbe_param->sa[k0];
+				if (a0 < 1.0f) a0 = 1.0f;
+				if (a1 < 1.0f) a1 = 1.0f;
+				a = exp2f((1.0f - fr) * log2f(a0) + fr * log2f(a1));
+			}
+			sa_w[l - 1] = a;
+			int kn = (int) lrintf(k);
+			if (kn < 1) kn = 1;
+			if (kn > n_in) kn = n_in;
+			vuv_w[l - 1] = imbe_param->v_uv_dsn[kn - 1];
+		}
+		nh = L;
+	} else {
 	// ref_pitch is Q8_8 in range 19.875 - 123.125
 	int b0_i = (imbe_param->ref_pitch >> 5) - 159;
 	if (b0_i < 0 || b0_i > b0_lmax) {
@@ -645,11 +700,7 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 		return;
 	}
 	b[0] = b0_lookup[b0_i];
-	int L;
-	if (dstar)
-		L = (int) AmbePlusLtable[b[0]];
-	else
-		L = (int) AmbeLtable[b[0]];
+	L = (int) AmbeLtable[b[0]];
 #if 1
 	// adjust b0 until L agrees
 	while (L != imbe_param->num_harms) {
@@ -662,15 +713,17 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 			return;
 		}
 		b[0] = b0_lookup[b0_i];
-		if (dstar)
-			L = (int) AmbePlusLtable[b[0]];
-		else
-			L = (int) AmbeLtable[b[0]];
+		L = (int) AmbeLtable[b[0]];
 	}
 #endif
+		for (int l = 0; l < nh; l++) {
+			sa_w[l] = (float) imbe_param->sa[l];
+			vuv_w[l] = imbe_param->v_uv_dsn[l];
+		}
+	}
 	float m_float2[NUM_HARMS_MAX];
 	for (int l=1; l <= L; l++) {
-		m_float2[l-1] = (float)imbe_param->sa[l-1] ;
+		m_float2[l-1] = sa_w[l-1] ;
 		m_float2[l-1] = m_float2[l-1] * m_float2[l-1];
 	}
 
@@ -689,7 +742,8 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 			if (l <= 36)
 				kl = (l + 2) / 3;
 			if (dstar) {
-				if (imbe_param->v_uv_dsn[(kl-1)*3] != AmbePlusVuv[n][jl])
+				// QSO One D-Star pitch fix: vuv_w is already per decoder harmonic
+				if (vuv_w[l-1] != AmbePlusVuv[n][jl])
 					En += m_float2[l-1];
 			} else {
 				if (imbe_param->v_uv_dsn[(kl-1)*3] != AmbeVuv[n][jl])
@@ -705,7 +759,7 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 	}
 
 	// log spectral amplitudes
-	float num_harms_f = (float) imbe_param->num_harms;
+	float num_harms_f = (float) nh;
 	float log_l_2 =  0.5 * log2f(num_harms_f);	// fixme: table lookup
 	float log_l_w0;
 	if (dstar)
@@ -715,10 +769,10 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 	float lsa[NUM_HARMS_MAX];
 	float lsa_sum=0.0;
 
-	for (int i1 = 0; i1 < imbe_param->num_harms; i1++) {
-		float sa = (float)imbe_param->sa[i1];
+	for (int i1 = 0; i1 < nh; i1++) {
+		float sa = sa_w[i1];
 		if (sa < 1) sa = 1.0;
-		if (imbe_param->v_uv_dsn[i1])
+		if (vuv_w[i1])
 			lsa[i1] = log_l_2 + log2f(sa);
 		else
 			lsa[i1] = log_l_w0 + log2f(sa);
@@ -766,14 +820,14 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 	float l_prev_l = (float) (prev_mp->L) / num_harms_f;
     //float tmp_s = 0.0;
 	prev_mp->log2Ml[0] = prev_mp->log2Ml[1];
-	for (int i1 = 0; i1 < imbe_param->num_harms; i1++) {
+	for (int i1 = 0; i1 < nh; i1++) {
         //float kl = l_prev_l * (float)(i1+1);
         //int kl_floor = (int) kl;
         //float kl_frac = kl - kl_floor;
         //tmp_s += (1.0 - kl_frac) * prev_mp->log2Ml[kl_floor  +0] + kl_frac * prev_mp->log2Ml[kl_floor+1  +0];
 	}
 	float T[NUM_HARMS_MAX];
-	for (int i1 = 0; i1 < imbe_param->num_harms; i1++) {
+	for (int i1 = 0; i1 < nh; i1++) {
 		float kl = l_prev_l * (float)(i1+1);
 		int kl_floor = (int) kl;
 		float kl_frac = kl - kl_floor;
@@ -784,9 +838,9 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 	// DCT
 	const int * J;
 	if (dstar)
-		J = AmbePlusLmprbl[imbe_param->num_harms];
+		J = AmbePlusLmprbl[nh];
 	else
-		J = AmbeLmprbl[imbe_param->num_harms];
+		J = AmbeLmprbl[nh];
 	float * c[4];
 	int acc = 0;
 	for (int i=0; i<4; i++) {

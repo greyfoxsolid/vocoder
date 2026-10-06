@@ -12,7 +12,10 @@
  *   4. P25 level tracks the input the same way (P25 was already fine);
  *   5. encoder / decoder reset gives a repeatable stream (same input -> same
  *      frames after a reset);
- *   6. the per-frame CPU time of all four operations (printed, not asserted).
+ *   6. the per-frame CPU time of all four operations (printed, not asserted);
+ *   7. THE D-STAR PITCH FIX: the decoded voice keeps the input pitch within
+ *      +/-1.5 % (before the fix D-Star played every voice 2.5 to 5 % sharp,
+ *      the "chipmunk" echo on XLX073 E, so reverting the fix fails this test).
  *
  * Usage: dv_test <male_8k.wav> <female_8k.wav>
  *        (the clips in test/clips/; the quiet and loud clips are derived)
@@ -90,6 +93,78 @@ static Level level(const vector<int16_t>& p) {
   for (double e : fr) if (e > mx * 1e-4) { s += e; n++; }
   return {n ? 10 * log10(s / n / (32768.0 * 32768.0) + 1e-20) : -200.0, clip};
 }
+
+// ---- 7. pitch tracking (the D-Star "chipmunk" fix, 2026-10-05) ----
+// YIN pitch per 10 ms hop (40 ms window, 55..420 Hz, threshold 0.12). Returns
+// 0 for an unvoiced / silent hop.
+static vector<double> yinTrack(const vector<int16_t>& x, vector<double>* rmsDb) {
+  const int W = 320, H = 80, tmin = 8000 / 420, tmax = 8000 / 55;
+  vector<double> f0;
+  vector<double> d(tmax + 1), cm(tmax + 1);
+  for (size_t s = 0; s + W + tmax < x.size(); s += H) {
+    double e = 0;
+    for (int i = 0; i < W; i++) e += (double)x[s + i] * x[s + i];
+    if (rmsDb) rmsDb->push_back(10 * log10(e / W / (32768.0 * 32768.0) + 1e-20));
+    d[0] = 0;
+    for (int t = 1; t <= tmax; t++) {
+      double acc = 0;
+      for (int i = 0; i < W; i++) {
+        double df = (double)x[s + i] - x[s + i + t];
+        acc += df * df;
+      }
+      d[t] = acc;
+    }
+    double run = 0;
+    cm[0] = 1;
+    for (int t = 1; t <= tmax; t++) {
+      run += d[t];
+      cm[t] = run > 0 ? d[t] * t / run : 1;
+    }
+    int tau = -1;
+    for (int t = tmin; t < tmax; t++) {
+      if (cm[t] < 0.12) {
+        while (t + 1 < tmax && cm[t + 1] < cm[t]) t++;
+        tau = t;
+        break;
+      }
+    }
+    if (tau < 1) { f0.push_back(0); continue; }
+    double y0 = cm[tau - 1], y1 = cm[tau], y2 = cm[tau + 1], den = y0 - 2 * y1 + y2;
+    double sh = den != 0 ? 0.5 * (y0 - y2) / den : 0;
+    f0.push_back(8000.0 / (tau + sh));
+  }
+  return f0;
+}
+
+// Median out/in pitch ratio over the hops voiced in both (output aligned by
+// the lag, 0..300 ms, that best matches the loudness envelopes; only ratios
+// inside 0.8..1.25 count, so this measures a pitch SHIFT, not octave jumps).
+static double pitchRatio(const vector<int16_t>& in, const vector<int16_t>& out, size_t* used) {
+  vector<double> ri, ro;
+  vector<double> fi = yinTrack(in, &ri), fo = yinTrack(out, &ro);
+  int bestLag = 0;
+  double best = -1e300;
+  for (int lag = 0; lag < 30; lag++) {
+    double num = 0;
+    size_t n = std::min(ri.size(), ro.size() - std::min(ro.size(), (size_t)lag));
+    for (size_t i = 0; i < n; i++) num += ri[i] * ro[i + lag];
+    if (num > best) { best = num; bestLag = lag; }
+  }
+  double mx = -1e300;
+  for (double v : ri) mx = std::max(mx, v);
+  vector<double> r;
+  for (size_t i = 0; i < fi.size() && i + bestLag < fo.size(); i++) {
+    if (ri[i] < mx - 35 || fi[i] <= 0 || fo[i + bestLag] <= 0) continue;
+    double q = fo[i + bestLag] / fi[i];
+    if (q > 0.8 && q < 1.25) r.push_back(q);
+  }
+  *used = r.size();
+  if (r.empty()) return 0;
+  std::sort(r.begin(), r.end());
+  return r[r.size() / 2];
+}
+
+static const double kPitchTol = 0.015;  // +/-1.5 % (the D-Star bug was +2.5..+4.9 %)
 
 struct Timing {
   double sum = 0, mx = 0;
@@ -221,6 +296,24 @@ int main(int argc, char** argv) {
     snprintf(m, sizeof m, "%s encoder reset -> identical frames for identical input",
              kind == kDstar ? "D-Star" : "P25");
     check(a == b, m);
+  }
+
+  // 7. pitch: the decoded voice keeps the speaker's pitch. Before the D-Star
+  // pitch fix the encoder picked b0 from a table built for the DMR pitch scale
+  // and the decoder plays b0 on the D-Star scale, so every voice came back 2.5
+  // to 5 % sharp ("chipmunk"). P25 is the control (it never had the bug).
+  printf("pitch (out/in, median over voiced 10 ms hops, limit +/-%.1f %%)\n", kPitchTol * 100);
+  for (int ci = 0; ci < 2; ci++) {
+    for (int kind : {(int)kDstar, (int)kP25}) {
+      Timing a, b;
+      vector<int16_t> o = roundTrip(kind, clips[ci].pcm, a, b);
+      size_t used = 0;
+      double q = pitchRatio(clips[ci].pcm, o, &used);
+      char m[160];
+      snprintf(m, sizeof m, "%s %s pitch ratio %.3f (%zu voiced hops)", kind == kDstar ? "D-Star" : "P25",
+               clips[ci].name, q, used);
+      check(used >= 100 && std::fabs(q - 1.0) <= kPitchTol, m);
+    }
   }
 
   // 6. CPU time per frame (all clips)

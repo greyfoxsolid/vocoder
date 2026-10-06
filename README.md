@@ -50,7 +50,7 @@ argument `dv`, as a separate process; that mode never calls `qdv_*` and needs no
 firmware. Protocol: `src/dv_mode.cpp`. Codecs: `third_party/dv_codecs/`
 (mbelib ISC, Pavel Yazev IMBE GPL v3+, OP25 AMBE encoder GPL v3+, MMDVMHost
 tables GPL v2+, DroidStar glue GPL v3+); our local changes, including the D-Star
-loudness fix, are listed in `NOTICE.md`.
+loudness fix and the D-Star pitch fix, are listed in `NOTICE.md`.
 
 Builds (every target links dv mode):
 - Windows x64: `build_windows.bat` -> `build-windows/qso_dmr_vocoder_helper.exe`
