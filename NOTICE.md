@@ -174,6 +174,25 @@ EXCEPT these changes, each marked "QSO One local change" in the source:
    4.6 dB, all FAIL). The build id adds `chip-tuned`. DMR / YSF mode and P25 stay
    byte-identical. `test/refframes/dstar_en_US_chip_level_db.txt` is the chip's
    per-frame output level for the en_US prompt frames (a measurement, for section 13).
+8. 2026-10-06 evening (QSO One Research/DSTAR_STICK2_2026-10-06.md), measured on the same
+   real DVSI AMBE-3000 used as a sealed box:
+   - `dstar_pitch.h` `DSTAR_CHIP_L[120]`: the harmonic count the chip plays for each pitch
+     code (= max(9, floor(0.46288 / f0))) replaces mbelib's `AmbePlusLtable` in the D-Star
+     encoder, its decoder model (`mbevocoder.cpp`) and the decoder (`ambe3600x2400.c`).
+     mbelib's table had 1-4 more harmonics on 102 of 120 codes, which laid the spectral
+     envelope ~5 % off along frequency (formants low on real radios, high in our decoder);
+   - `ambe3600x2400.c`: after mbelib's spectral enhancement the D-Star decoder scales
+     unvoiced harmonics -4.5 dB and all harmonics +1.0 dB per octave of pitch about
+     125 Hz (`DSTAR_DEC_*`), the chip's level per harmonic class; `DSTAR_OUT_GAIN_DB`
+     5.0 -> 5.4.
+   Proof: `test/dv_test.cpp` sections 14-16 (harmonic count equal to the chip's on all
+   120 codes; formants of real D-Star frames within 1 % of the chip's decode; our
+   encoder's formants within 1.5 % of the chip encoder's; at the previous build: 102 of
+   120 codes wrong, 1.012 / 1.047 / 1.046, 0.964 / 0.964 / 0.956, all FAIL). The build id
+   adds `chip-shape`. New measurement files: `test/refframes/dstar_chip_harmonic_probe.ambe`,
+   `dstar_chip_harmonics.txt`, `dstar_en_US_chip_shape.txt` (the chip's decode of the
+   en_US prompt frames as a shape track) and `dstar_{male,female}_harvard_chip.ambe` (the
+   test clips encoded by the chip). DMR / YSF mode and P25 stay byte-identical.
 
 The test files `test/refframes/dstar_en_US_ircddbgateway.ambe` (ircDDBGateway
 `Data/en_US.ambe`) and `test/refframes/dmr_en_US_dmrgateway.ambe` (DMRGateway

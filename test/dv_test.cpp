@@ -24,11 +24,19 @@
  *  12. (2026-10-06 pm) the encoder moves the loudness index <= 5 steps per frame (chip 3.9);
  *  13. (2026-10-06 pm, optional arg 5) real D-Star frames decode at a real DVSI decoder's
  *      level (+/-3 dB) with a per-frame spread under 4.5 dB (chip reference file);
+ *  14. (2026-10-06 evening, optional args 6-7) our decoder plays the SAME harmonic count as a
+ *      real DVSI chip for every pitch code (the voice-shape fault: mbelib's table had 1-4 more);
+ *  15. (2026-10-06 evening, optional arg 8) real D-Star frames: our decoder's formants F1-F3
+ *      within 1 % of the chip's decode of the same frames;
+ *  16. (optional args 9-10) our encoder's frames vs the chip encoder's frames of the same clips,
+ *      both played by our decoder: formants within 1.5 %;
  *  10. (2026-10-06, optional args) REAL D-Star radio frames (G4KLX's en_US
  *      prompts) play at the pitch of the same recording in DMR AMBE+2 (the real-
  *      radio pitch scale: mbelib's "w0 guess" played them 3 % flat).
  *
- * Usage: dv_test <male_8k.wav> <female_8k.wav> [<dstar prompts> <dmr prompts> [<chip level ref>]]
+ * Usage: dv_test <male_8k.wav> <female_8k.wav> [<dstar prompts> <dmr prompts> [<chip level ref>
+ *        [<harmonic probe .ambe> <chip harmonics .txt> [<chip shape track .txt>
+ *        [<male clip, chip-encoded .ambe> <female clip, chip-encoded .ambe>]]]]]
  *        (the clips in test/clips/; the quiet and loud clips are derived;
  *        the prompt files in test/refframes/)
  * Exit 0 = PASS.
@@ -37,6 +45,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -255,7 +264,177 @@ static vector<int16_t> roundTrip(int kind, const vector<int16_t>& in, Timing& te
   return out;
 }
 
+// ---- Voice shape (2026-10-06 evening, sections 14-16) -------------------------------
+// Per 10 ms hop (32 ms Hamming frames): level (dB), voiced flag (active within 25 dB of
+// the loudest frame and normalised autocorrelation peak >= 0.5 at a 60-400 Hz lag) and
+// the three lowest LPC formants (order 10, pre-emphasis 0.9; roots with bandwidth under
+// 500 Hz between 150 and 3800 Hz). Same rules as the bench's shape.py.
+struct ShapeHop { double e; int v; double F[3]; };
+
+static vector<std::complex<double>> polyRoots(const vector<double>& a) {
+  // monic a[0] = 1: z^p + a1 z^(p-1) + ... + ap; Durand-Kerner
+  const int p = (int)a.size() - 1;
+  vector<std::complex<double>> r(p);
+  for (int i = 0; i < p; i++) r[i] = std::polar(0.9, 2 * M_PI * (i + 0.25) / p);
+  for (int it = 0; it < 500; it++) {
+    double moved = 0;
+    for (int i = 0; i < p; i++) {
+      std::complex<double> num = 1.0;
+      for (int k = 1; k <= p; k++) num = num * r[i] + a[k];
+      std::complex<double> den = 1.0;
+      for (int j = 0; j < p; j++) if (j != i) den *= (r[i] - r[j]);
+      std::complex<double> d = num / den;
+      r[i] -= d;
+      moved = std::max(moved, std::abs(d));
+    }
+    if (moved < 1e-12) break;
+  }
+  return r;
+}
+
+static vector<ShapeHop> shapeTrack(const vector<int16_t>& x) {
+  const int N = 256, H = 80, FS = 8000;
+  vector<ShapeHop> out;
+  if (x.size() < (size_t)N) return out;
+  const size_t m = (x.size() - N) / H;
+  vector<double> w(N);
+  for (int i = 0; i < N; i++) w[i] = 0.54 - 0.46 * std::cos(2 * M_PI * i / (N - 1));
+  double emax = -1e9;
+  for (size_t f = 0; f < m; f++) {
+    double s = 0;
+    for (int i = 0; i < N; i++) s += (double)x[f * H + i] * x[f * H + i];
+    ShapeHop h{10 * std::log10(s / N + 1e-9), 0, {0, 0, 0}};
+    emax = std::max(emax, h.e);
+    out.push_back(h);
+  }
+  for (size_t f = 0; f < m; f++) {
+    if (out[f].e <= emax - 25) continue;
+    vector<double> fr(N);
+    double mean = 0;
+    for (int i = 0; i < N; i++) mean += x[f * H + i];
+    mean /= N;
+    for (int i = 0; i < N; i++) fr[i] = x[f * H + i] - mean;
+    double r0 = 0;
+    for (int i = 0; i < N; i++) r0 += fr[i] * fr[i];
+    if (r0 <= 0) continue;
+    double best = -2;
+    for (int k = FS / 400; k < FS / 60; k++) {
+      double s = 0;
+      for (int i = 0; i + k < N; i++) s += fr[i] * fr[i + k];
+      best = std::max(best, s / r0);
+    }
+    if (best < 0.5) continue;
+    // LPC (autocorrelation, Levinson) on the pre-emphasised, windowed frame
+    vector<double> g(N);
+    g[0] = x[f * H] * w[0];
+    for (int i = 1; i < N; i++) g[i] = (x[f * H + i] - 0.9 * x[f * H + i - 1]) * w[i];
+    const int P = 10;
+    double R[P + 1];
+    for (int k = 0; k <= P; k++) {
+      double s = 0;
+      for (int i = 0; i + k < N; i++) s += g[i] * g[i + k];
+      R[k] = s;
+    }
+    R[0] *= 1.0001;
+    vector<double> a(P + 1, 0.0);
+    a[0] = 1;
+    double err = R[0];
+    for (int i = 1; i <= P; i++) {
+      double acc = R[i];
+      for (int j = 1; j < i; j++) acc += a[j] * R[i - j];
+      double k = -acc / err;
+      vector<double> na = a;
+      for (int j = 1; j < i; j++) na[j] = a[j] + k * a[i - j];
+      na[i] = k;
+      a = na;
+      err *= (1 - k * k);
+    }
+    vector<double> fq;
+    for (auto& z : polyRoots(a)) {
+      if (z.imag() <= 0) continue;
+      double hz = std::arg(z) * FS / (2 * M_PI), bw = -std::log(std::abs(z)) * FS / M_PI;
+      if (bw < 500 && hz > 150 && hz < 3800) fq.push_back(hz);
+    }
+    std::sort(fq.begin(), fq.end());
+    if (fq.size() < 3) continue;
+    out[f].v = 1;
+    for (int j = 0; j < 3; j++) out[f].F[j] = fq[j];
+  }
+  return out;
+}
+
+// Median ratio ours/ref of F1..F3 over hops voiced in both; a pair counts when the two
+// agree within 25 % (the same formant). Alignment (one lag for the whole file, +/-30 hops):
+// the lag at which the most voiced hops carry the same F2 within 5 % (two decoders' level
+// contours and waveforms do not line up exactly; the formant track does).
+static void shapeRatios(const vector<ShapeHop>& ours, const vector<ShapeHop>& ref, double q[3], size_t* used) {
+  int bestLag = 0;
+  size_t bestN = 0;
+  for (int lag = -30; lag <= 30; lag++) {
+    size_t n = 0;
+    for (size_t i = 0; i < ref.size(); i++) {
+      long j = (long)i + lag;
+      if (j < 0 || j >= (long)ours.size() || !ref[i].v || !ours[j].v) continue;
+      if (std::fabs(ours[j].F[1] / ref[i].F[1] - 1.0) < 0.05) n++;
+    }
+    if (n > bestN) { bestN = n; bestLag = lag; }
+  }
+  *used = 0;
+  for (int j = 0; j < 3; j++) {
+    vector<double> r;
+    for (size_t i = 0; i < ref.size(); i++) {
+      long k = (long)i + bestLag;
+      if (k < 0 || k >= (long)ours.size() || !ref[i].v || !ours[k].v) continue;
+      double v = ours[k].F[j] / ref[i].F[j];
+      if (v > 0.8 && v < 1.25) r.push_back(v);
+    }
+    std::sort(r.begin(), r.end());
+    q[j] = r.empty() ? 0 : r[r.size() / 2];
+    if (j == 0) *used = r.size();
+  }
+}
+
+static vector<ShapeHop> readShapeTrack(const char* path) {
+  vector<ShapeHop> t;
+  FILE* f = fopen(path, "r");
+  if (!f) return t;
+  char line[160];
+  while (fgets(line, sizeof line, f)) {
+    if (line[0] == '#') continue;
+    ShapeHop h{0, 0, {0, 0, 0}};
+    if (sscanf(line, "%lf %d %lf %lf %lf", &h.e, &h.v, &h.F[0], &h.F[1], &h.F[2]) == 5) t.push_back(h);
+  }
+  fclose(f);
+  return t;
+}
+
+static vector<int16_t> decodeDstarFile(const char* path) {
+  vector<uint8_t> ds = readFile(path);
+  size_t o = (ds.size() >= 4 && !memcmp(ds.data(), "AMBE", 4)) ? 4 : 0;
+  MBEVocoder d;
+  vector<int16_t> out;
+  for (size_t i = o; i + 9 <= ds.size(); i += 9) {
+    int16_t pcm[160];
+    uint8_t fr[9];
+    memcpy(fr, &ds[i], 9);
+    d.decode_2400x1200(pcm, fr);
+    out.insert(out.end(), pcm, pcm + 160);
+  }
+  return out;
+}
+
 int main(int argc, char** argv) {
+  // Reference maker (not a test): dv_test --shape-track <in.wav> <out.txt>
+  if (argc == 4 && !strcmp(argv[1], "--shape-track")) {
+    auto t = shapeTrack(readWav(argv[2]));
+    FILE* f = fopen(argv[3], "w");
+    if (!f || t.empty()) return 2;
+    fprintf(f, "# dv_test voice-shape track (10 ms hops): level_dB voiced F1 F2 F3. QSO One dv_test pin 15.\n");
+    for (auto& h : t) fprintf(f, "%.2f %d %.1f %.1f %.1f\n", h.e, h.v, h.F[0], h.F[1], h.F[2]);
+    fclose(f);
+    printf("%zu hops\n", t.size());
+    return 0;
+  }
   if (argc < 3) {
     printf("usage: dv_test <male_8k.wav> <female_8k.wav>\n");
     return 2;
@@ -563,6 +742,95 @@ int main(int argc, char** argv) {
     snprintf(m, sizeof m, "real D-Star frames: our level minus a real DVSI decoder's %+.2f dB (limit +/-3), per-frame spread %.2f dB (limit 4.5)",
              bestMean, bestSd);
     check(ref.size() > 1000 && std::fabs(bestMean) <= 3.0 && bestSd <= 4.5, m);
+  }
+
+  // 14. THE CHIP'S HARMONIC COUNT (2026-10-06 evening). Optional args 6 and 7: probe frames
+  // (pitch code b0 held 25 frames each, all voiced, flat envelope; codes 0..119) and the
+  // harmonic count a real DVSI AMBE-3000 played for each code. Our decoder must play the
+  // same count for EVERY code (highest harmonic within 20 dB of the harmonics below 2 kHz).
+  // Before: mbelib's AmbePlusLtable, 1-4 harmonics more on 102 of the 120 codes, which laid
+  // the voice shape ~5 % off along frequency both ways.
+  if (argc >= 8) {
+    printf("D-Star harmonic count per pitch code vs a real DVSI chip\n");
+    vector<int16_t> y = decodeDstarFile(argv[6]);
+    vector<int> chipL(120, -1);
+    FILE* f = fopen(argv[7], "r");
+    if (f) {
+      char line[160];
+      while (fgets(line, sizeof line, f)) {
+        int b, l;
+        if (line[0] != '#' && sscanf(line, "%d %d", &b, &l) == 2 && b >= 0 && b < 120) chipL[b] = l;
+      }
+      fclose(f);
+    }
+    int bad = 0, firstBad = -1, ourL = 0, cl = 0;
+    for (int b0 = 0; b0 < 120 && y.size() >= (size_t)(b0 + 1) * 25 * 160; b0++) {
+      const int n = 15 * 160;
+      const int16_t* s = &y[(size_t)(b0 * 25 + 10) * 160];
+      const double f0 = std::pow(2.0, -4.24734 - 0.021762 * (b0 + 0.5));   // cycles per sample (chip scale, pin 11)
+      vector<double> pw;
+      for (int k = 1; k * f0 < 0.49875; k++) {
+        double re = 0, im = 0;
+        for (int i = 0; i < n; i++) {
+          double wv = 0.5 - 0.5 * std::cos(2 * M_PI * i / (n - 1));
+          re += s[i] * wv * std::cos(2 * M_PI * k * f0 * i);
+          im -= s[i] * wv * std::sin(2 * M_PI * k * f0 * i);
+        }
+        pw.push_back(re * re + im * im);
+      }
+      vector<double> low;
+      for (size_t k = 0; k < pw.size(); k++) if ((k + 1) * f0 * 8000 < 2000) low.push_back(pw[k]);
+      std::sort(low.begin(), low.end());
+      double ref = low.empty() ? 1 : low[low.size() / 2];
+      int L = 0;
+      for (size_t k = 0; k < pw.size(); k++) if (pw[k] > ref * 0.01) L = (int)k + 1;
+      if (L != chipL[b0]) { bad++; if (firstBad < 0) { firstBad = b0; ourL = L; cl = chipL[b0]; } }
+    }
+    char m[192];
+    if (bad) snprintf(m, sizeof m, "harmonic count differs from the chip on %d of 120 codes (first b0 %d: ours %d, chip %d)", bad, firstBad, ourL, cl);
+    else snprintf(m, sizeof m, "harmonic count equals the chip's on all 120 codes");
+    check(bad == 0 && chipL[119] > 0, m);
+  }
+
+  // 15. OUR DECODER PUTS THE VOICE SHAPE WHERE A REAL DECODER DOES (2026-10-06 evening).
+  // Optional arg 8: the chip's decode of the en_US prompt frames (arg 3) as a shape track
+  // (made by `dv_test --shape-track`). Our decode of the same frames: formants F1, F2, F3
+  // within 1 % of the chip's (median over hops voiced in both). Before (663): 1.018 /
+  // 1.048 / 1.044 (we played real radios ~5 % high, "chipmunkish").
+  if (argc >= 9) {
+    printf("voice shape: real D-Star frames, our decoder vs a real DVSI decoder (formants, limit +/-1 %%)\n");
+    auto ours = shapeTrack(decodeDstarFile(argv[3]));
+    auto ref = readShapeTrack(argv[8]);
+    double q[3];
+    size_t used = 0;
+    shapeRatios(ours, ref, q, &used);
+    char m[192];
+    snprintf(m, sizeof m, "formants F1 %.3f F2 %.3f F3 %.3f x the chip's (%zu voiced hops)", q[0], q[1], q[2], used);
+    check(used > 500 && std::fabs(q[0] - 1) <= 0.01 && std::fabs(q[1] - 1) <= 0.01 && std::fabs(q[2] - 1) <= 0.01, m);
+
+  }
+
+  // 16. OUR ENCODER PUTS THE VOICE SHAPE WHERE A REAL ENCODER DOES. Optional args 9 and 10:
+  // the male and female clips (args 1-2, as is) encoded by the chip (a real radio's frames).
+  // Both frame streams are played by OUR decoder, so its own small differences cancel and
+  // only the encoders are compared: our frames' formants within 1.5 % of the chip's frames'
+  // (1.5 %, not 1 %: going through a decoder that is not the chip leaves ~0.5-1 % of F1
+  // noise; on the chip itself our frames sit within 0.4 % of the chip's own, bench p16_check).
+  // Before (663): our encoder laid the shape on mbelib's harmonic count, ~5 % low against
+  // the chip's frames (what real radios heard: bassy).
+  if (argc >= 11) {
+    printf("voice shape: our encoder vs a real encoder (both played by our decoder; formants, limit +/-1.5 %%)\n");
+    for (int c = 0; c < 2; c++) {
+      Timing ta, tb;
+      vector<int16_t> o2 = roundTrip(kDstar, clips[c].pcm, ta, tb);
+      auto ref = shapeTrack(decodeDstarFile(argv[9 + c]));
+      double q[3];
+      size_t used = 0;
+      shapeRatios(shapeTrack(o2), ref, q, &used);
+      char m[192];
+      snprintf(m, sizeof m, "%s: formants F1 %.3f F2 %.3f F3 %.3f x the chip encoder's (%zu voiced hops)", clips[c].name, q[0], q[1], q[2], used);
+      check(used > 150 && std::fabs(q[0] - 1) <= 0.015 && std::fabs(q[1] - 1) <= 0.015 && std::fabs(q[2] - 1) <= 0.015, m);
+    }
   }
 
   // 6. CPU time per frame (all clips)

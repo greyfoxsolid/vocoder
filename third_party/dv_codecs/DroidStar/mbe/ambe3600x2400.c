@@ -291,7 +291,7 @@ mbe_decodeAmbe2400Parms (char *ambe_d, mbe_parms * cur_mp, mbe_parms * prev_mp)
     {
       // L from specification document 
       // lookup L in tabl3
-      L = AmbePlusLtable[b0];
+      L = DSTAR_L(b0);	// QSO One: the chip-measured harmonic count (dstar_pitch.h 3); was AmbePlusLtable[b0]
       // L formula from patent filings
       //L=(int)((float)0.4627 / f0);
       cur_mp->L = L;
@@ -700,6 +700,18 @@ mbe_processAmbe2400Dataf (float *aout_buf, int *errs2, char *err_str, char ambe_
         {
           mbe_moveMbeParms (cur_mp, prev_mp);
           mbe_spectralAmpEnhance (cur_mp);
+          {
+            /* QSO One local change (2026-10-06 evening; dstar_pitch.h 4, NOTICE.md): the chip's
+             * level per harmonic class and pitch. After the enhancement, so the coded state
+             * (prev_mp) is untouched; the enhanced copy carries it into the next frame's blend. */
+            int l;
+            const float gv = powf (10.0f, DSTAR_DEC_VOICED_DB / 20.0f);
+            const float gu = powf (10.0f, DSTAR_DEC_UNVOICED_DB / 20.0f);
+            const float fhz = cur_mp->w0 / (2.0f * (float) M_PI) * 8000.0f;
+            const float gp = powf (10.0f, DSTAR_DEC_PITCH_DB_PER_OCT * log2f (fhz / DSTAR_DEC_PITCH_REF_HZ) / 20.0f);
+            for (l = 1; l <= cur_mp->L; l++)
+              cur_mp->Ml[l] *= (cur_mp->Vl[l] ? gv : gu) * gp;
+          }
           mbe_synthesizeSpeechf (aout_buf, cur_mp, prev_mp_enhanced, uvquality);
           mbe_moveMbeParms (cur_mp, prev_mp_enhanced);
         }

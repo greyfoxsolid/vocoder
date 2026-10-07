@@ -330,7 +330,7 @@ mbe_dequantizeAmbeParms (mbe_parms * cur_mp, mbe_parms * prev_mp, const int *b, 
       // L from specification document 
       // lookup L in tabl3
       if (dstar)
-        L = AmbePlusLtable[b0];
+        L = DSTAR_L(b0);	// QSO One: the chip-measured harmonic count (dstar_pitch.h 3)
       else
         L = AmbeLtable[b0];
       // L formula form patent filings
@@ -682,7 +682,7 @@ void encode_ambe(const IMBE_PARAM *imbe_param, int b[], mbe_parms*cur_mp, mbe_pa
 		if (b0 < 0) b0 = 0;
 		if (b0 > 119) b0 = 119;	// 120..127 are erasure / silence / tone codes
 		b[0] = b0;
-		L = (int) AmbePlusLtable[b0];
+		L = DSTAR_L(b0);	// QSO One: the chip-measured harmonic count (dstar_pitch.h 3; mbelib table before)
 		float f0_c = make_f0(b0);
 		const int n_in = imbe_param->num_harms;
 		for (int l = 1; l <= L; l++) {
